@@ -81,7 +81,6 @@ class LLMProvider(ABC):
         Returns:
             LLMResponse with content and/or tool calls.
         """
-        pass
 
     async def chat_stream(
         self,
@@ -116,4 +115,3 @@ class LLMProvider(ABC):
     @abstractmethod
     def get_default_model(self) -> str:
         """Get the default model for this provider."""
-        pass

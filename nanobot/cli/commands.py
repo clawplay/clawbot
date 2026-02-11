@@ -182,7 +182,6 @@ def main(
     ),
 ):
     """nanobot - Personal AI Assistant."""
-    pass
 
 
 # ============================================================================
@@ -334,6 +333,8 @@ def gateway(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
 ):
     """Start the nanobot gateway."""
+    from loguru import logger
+
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
     from nanobot.channels.manager import ChannelManager
@@ -371,7 +372,31 @@ def gateway(
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
         session_manager=session_manager,
+        memory_config=config.memory,
     )
+
+    # Create embedding worker for postgres backend
+    memory_worker = None
+    if config.memory.backend == "postgres" and config.memory.postgres.dsn:
+        try:
+            from nanobot.agent.embedding import EmbeddingService
+            from nanobot.agent.memory_worker import MemoryEmbeddingWorker
+
+            emb_svc = EmbeddingService(
+                model=config.memory.embedding.model,
+                dimensions=config.memory.embedding.dimensions,
+                api_base=config.memory.embedding.base_url,
+                api_key=config.memory.embedding.key,
+            )
+            memory_worker = MemoryEmbeddingWorker(
+                dsn=config.memory.postgres.dsn,
+                embedding_service=emb_svc,
+                poll_interval=config.memory.queue_poll_interval,
+            )
+        except ImportError:
+            logger.warning("psycopg not installed, memory embedding worker disabled")
+        except Exception as e:
+            logger.warning(f"Failed to create memory worker: {e}")
 
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
@@ -422,18 +447,35 @@ def gateway(
     if cron_status["jobs"] > 0:
         console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
 
-    console.print(f"[green]✓[/green] Heartbeat: every 30m")
+    if memory_worker:
+        console.print(
+            f"[green]✓[/green] Memory: postgres (dim={config.memory.embedding.dimensions})"
+        )
+    else:
+        console.print("[green]✓[/green] Memory: file")
+
+    console.print("[green]✓[/green] Heartbeat: every 30m")
 
     async def run():
         try:
+            # Initialize memory backend (pool connect, schema)
+            from nanobot.agent.memory_factory import close_memory, initialize_memory
+
+            await initialize_memory(agent._memory)
+
             await cron.start()
             await heartbeat.start()
+            if memory_worker:
+                await memory_worker.start()
             await asyncio.gather(
                 agent.run(),
                 channels.start_all(),
             )
         except KeyboardInterrupt:
             console.print("\nShutting down...")
+            if memory_worker:
+                await memory_worker.stop()
+            await close_memory(agent._memory)
             heartbeat.stop()
             cron.stop()
             agent.stop()
@@ -484,6 +526,7 @@ def agent(
         brave_api_key=config.tools.web.search.api_key or None,
         exec_config=config.tools.exec,
         restrict_to_workspace=config.tools.restrict_to_workspace,
+        memory_config=config.memory,
     )
 
     # Show spinner when logs are off (no output to miss); skip when logs are on

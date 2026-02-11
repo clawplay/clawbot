@@ -15,6 +15,11 @@ from nanobot.agent.tools.filesystem import (
     ReadFileTool,
     WriteFileTool,
 )
+from nanobot.agent.tools.memory import (
+    ReadMemoryTool,
+    SaveMemoryTool,
+    UpdateLongTermMemoryTool,
+)
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
@@ -50,6 +55,7 @@ class AgentLoop:
         cron_service: "CronService | None" = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
+        memory_config: "MemoryConfig | None" = None,
     ):
         from nanobot.config.schema import ExecToolConfig
 
@@ -63,7 +69,11 @@ class AgentLoop:
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
 
-        self.context = ContextBuilder(workspace)
+        # Create memory backend and conversation ingestor via factory
+        from nanobot.agent.memory_factory import create_memory_backend
+
+        self._memory, self._ingestor = create_memory_backend(workspace, memory_config)
+        self.context = ContextBuilder(workspace, memory=self._memory)
         self.sessions = session_manager or SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
@@ -77,6 +87,7 @@ class AgentLoop:
         )
 
         self._running = False
+        self._background_tasks: set[asyncio.Task] = set()
         self._register_default_tools()
 
     def _register_default_tools(self) -> None:
@@ -112,6 +123,17 @@ class AgentLoop:
         # Cron tool (for scheduling)
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+
+        # Memory tools
+        self.tools.register(SaveMemoryTool(self._memory))
+        self.tools.register(UpdateLongTermMemoryTool(self._memory))
+        self.tools.register(ReadMemoryTool(self._memory))
+
+    def _fire_and_forget(self, coro) -> None:
+        """Schedule a coroutine as a background task with proper lifecycle management."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
@@ -195,7 +217,7 @@ class AgentLoop:
             cron_tool.set_context(msg.channel, msg.chat_id)
 
         # Build initial messages (use get_history for LLM-formatted messages)
-        messages = self.context.build_messages(
+        messages = await self.context.build_messages(
             history=session.get_history(),
             current_message=msg.content,
             media=msg.media if msg.media else None,
@@ -267,6 +289,11 @@ class AgentLoop:
         session.add_message("assistant", final_content)
         self.sessions.save(session)
 
+        # Auto-ingest conversation to memory (fire-and-forget)
+        self._fire_and_forget(
+            self._ingestor.ingest(msg.session_key, msg.content, final_content)
+        )
+
         return OutboundMessage(
             channel=msg.channel,
             chat_id=msg.chat_id,
@@ -314,7 +341,7 @@ class AgentLoop:
             cron_tool.set_context(origin_channel, origin_chat_id)
 
         # Build messages with the announce content
-        messages = self.context.build_messages(
+        messages = await self.context.build_messages(
             history=session.get_history(),
             current_message=msg.content,
             channel=origin_channel,
@@ -444,7 +471,7 @@ class AgentLoop:
             cron_tool.set_context(msg.channel, msg.chat_id)
 
         # Build initial messages
-        messages = self.context.build_messages(
+        messages = await self.context.build_messages(
             history=session.get_history(),
             current_message=msg.content,
             media=msg.media if msg.media else None,
@@ -550,6 +577,11 @@ class AgentLoop:
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content)
         self.sessions.save(session)
+
+        # Auto-ingest conversation to memory (fire-and-forget)
+        self._fire_and_forget(
+            self._ingestor.ingest(msg.session_key, msg.content, final_content)
+        )
 
         # Streaming responses are sent via callback, no OutboundMessage needed
         return None

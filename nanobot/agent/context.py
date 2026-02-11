@@ -1,12 +1,14 @@
 """Context builder for assembling agent prompts."""
 
+from __future__ import annotations
+
 import base64
 import mimetypes
 import platform
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.memory import MemoryStore
+from nanobot.agent.memory_base import MemoryBackend
 from nanobot.agent.skills import SkillsLoader
 
 
@@ -20,17 +22,24 @@ class ContextBuilder:
 
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, memory: MemoryBackend | None = None):
+        from nanobot.agent.memory import MemoryStore
+
         self.workspace = workspace
-        self.memory = MemoryStore(workspace)
+        self.memory: MemoryBackend = memory or MemoryStore(workspace)
         self.skills = SkillsLoader(workspace)
 
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    async def build_system_prompt(
+        self,
+        skill_names: list[str] | None = None,
+        current_query: str | None = None,
+    ) -> str:
         """
         Build the system prompt from bootstrap files, memory, and skills.
 
         Args:
             skill_names: Optional list of skills to include.
+            current_query: Current user query (used for semantic search if available).
 
         Returns:
             Complete system prompt.
@@ -45,8 +54,11 @@ class ContextBuilder:
         if bootstrap:
             parts.append(bootstrap)
 
-        # Memory context
-        memory = self.memory.get_memory_context()
+        # Memory context — use semantic search when available
+        if current_query and hasattr(self.memory, "get_memory_context_semantic"):
+            memory = await self.memory.get_memory_context_semantic(current_query)
+        else:
+            memory = await self.memory.get_memory_context()
         if memory:
             parts.append(f"# Memory\n\n{memory}")
 
@@ -81,14 +93,15 @@ Skills with available="false" need dependencies installed first - you can try in
         system = platform.system()
         runtime = f"{'macOS' if system == 'Darwin' else system} {platform.machine()}, Python {platform.python_version()}"
 
-        return f"""# nanobot 🐈
+        return f"""# AI assistant 🐈
 
-You are nanobot, a helpful AI assistant. You have access to tools that allow you to:
+You are a helpful AI assistant. You have access to tools that allow you to:
 - Read, write, and edit files
 - Execute shell commands
 - Search the web and fetch web pages
 - Send messages to users on chat channels
 - Spawn subagents for complex background tasks
+- Save and read memories using memory tools
 
 ## Current Time
 {now}
@@ -98,16 +111,22 @@ You are nanobot, a helpful AI assistant. You have access to tools that allow you
 
 ## Workspace
 Your workspace is at: {workspace_path}
-- Memory files: {workspace_path}/memory/MEMORY.md
-- Daily notes: {workspace_path}/memory/YYYY-MM-DD.md
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
+
+## Memory
+Use the memory tools to persist important information:
+- `save_memory`: Save facts, preferences, or notes to today's daily memory
+- `update_long_term_memory`: Update persistent long-term memory (read first to avoid overwriting)
+- `read_memory`: Read today's notes, long-term memory, or recent days
+
+When you learn something important about the user (name, preferences, context), proactively save it using `save_memory`.
+Do NOT write directly to memory files — always use the memory tools.
 
 IMPORTANT: When responding to direct questions or conversations, reply directly with your text response.
 Only use the 'message' tool when you need to send a message to a specific chat channel (like WhatsApp).
 For normal conversation, just respond with text - do not call the message tool.
 
-Always be helpful, accurate, and concise. When using tools, explain what you're doing.
-When remembering something, write to {workspace_path}/memory/MEMORY.md"""
+Always be helpful, accurate, and concise. When using tools, explain what you're doing."""
 
     def _load_bootstrap_files(self) -> str:
         """Load all bootstrap files from workspace."""
@@ -121,7 +140,7 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
 
         return "\n\n".join(parts) if parts else ""
 
-    def build_messages(
+    async def build_messages(
         self,
         history: list[dict[str, Any]],
         current_message: str,
@@ -147,7 +166,9 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
         messages = []
 
         # System prompt
-        system_prompt = self.build_system_prompt(skill_names)
+        system_prompt = await self.build_system_prompt(
+            skill_names, current_query=current_message
+        )
         if channel and chat_id:
             system_prompt += (
                 f"\n\n## Current Session\nChannel: {channel}\nChat ID: {chat_id}"
@@ -192,18 +213,7 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
         tool_name: str,
         result: str,
     ) -> list[dict[str, Any]]:
-        """
-        Add a tool result to the message list.
-
-        Args:
-            messages: Current message list.
-            tool_call_id: ID of the tool call.
-            tool_name: Name of the tool.
-            result: Tool execution result.
-
-        Returns:
-            Updated message list.
-        """
+        """Add a tool result to the message list."""
         messages.append(
             {
                 "role": "tool",
@@ -221,24 +231,12 @@ When remembering something, write to {workspace_path}/memory/MEMORY.md"""
         tool_calls: list[dict[str, Any]] | None = None,
         reasoning_content: str | None = None,
     ) -> list[dict[str, Any]]:
-        """
-        Add an assistant message to the message list.
-
-        Args:
-            messages: Current message list.
-            content: Message content.
-            tool_calls: Optional tool calls.
-            reasoning_content: Thinking output (Kimi, DeepSeek-R1, etc.).
-
-        Returns:
-            Updated message list.
-        """
+        """Add an assistant message to the message list."""
         msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
 
         if tool_calls:
             msg["tool_calls"] = tool_calls
 
-        # Thinking models reject history without this
         if reasoning_content:
             msg["reasoning_content"] = reasoning_content
 
