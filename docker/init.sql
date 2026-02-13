@@ -1,4 +1,4 @@
--- nanobot memory backend: PostgreSQL + pgvector + pgmq
+-- baibo memory backend: PostgreSQL + pgvector + pgmq
 -- This runs once on container init.
 
 CREATE EXTENSION IF NOT EXISTS vector;

@@ -1,9 +1,9 @@
 <div align="center">
-  <img src="logo.png" alt="clawbot" width="500">
-  <h1>clawbot: Lightweight Personal AI Assistant with more infrastructure</h1>
+  <img src="assets/Bai.png" alt="baibo" width="500">
+  <h1>baibo: Lightweight Personal AI Assistant with more infrastructure</h1>
 </div>
 
-**clawbot** is a **lightweight** personal AI assistant built on top of [Nanobot](https://github.com/HKUDS/nanobot). It adds production-grade infrastructure (PostgreSQL + pgvector + pgmq), a hybrid memory system, and multi-channel support while keeping the core agent simple.
+**baibo** is a **lightweight** personal AI assistant built on top of [baibo](https://github.com/HKUDS/baibo). It adds production-grade infrastructure (PostgreSQL + pgvector + pgmq), a hybrid memory system, and multi-channel support while keeping the core agent simple.
 
 ## Architecture
 
@@ -23,7 +23,7 @@ The system is split into three independent layers:
 │  └────┬─────┘  └──────┬───────┘  └────────┘  └──────────────────┘  │
 │       │               │                                             │
 │       │        ┌──────▼───────┐                                     │
-│       │        │ Memory Layer │ (see below)                         │
+│       │        │ Memory Layer │                                     │
 │       │        └──────────────┘                                     │
 │       │                                                             │
 │  ┌────▼─────────────────────────────────────────────────────────┐   │
@@ -44,85 +44,28 @@ The system is split into three independent layers:
 
 **Infrastructure** provides persistence and compute — PostgreSQL for memory storage and job queuing, external embedding APIs for vectorization, and LLM providers (Anthropic, OpenAI, DeepSeek, etc.) via litellm.
 
-## Memory System
-
-clawbot uses a **hybrid memory** architecture combining two storage strategies and two retrieval strategies:
-
-```
-                        ┌──────────────────────────────────────┐
-  Every turn            │  memory_conversation                 │
-  (auto-ingest) ───────►│  raw user + assistant messages       │──┐
-                        └──────────────────────────────────────┘  │
-                        ┌──────────────────────────────────────┐  │  Semantic
-  save_memory()         │  memory_daily                        │  ├─ Search
-  (agent-curated) ─────►│  distilled facts, date-partitioned   │──┤  (pgvector)
-                        └──────────────────────────────────────┘  │
-                        ┌──────────────────────────────────────┐  │
-  update_long_term      │  memory_long_term                    │  │
-  _memory()       ─────►│  persistent user profile & context   │──┘
-  (consolidated)        └──────────────────────────────────────┘
-                                        │
-                              async embedding worker
-                              (pgmq background jobs)
-```
-
-### Hybrid Storage
-
-| Strategy | Table | Trigger | Content |
-|---|---|---|---|
-| **Async full-capture** | `memory_conversation` | Automatic, every turn | Raw dialogue as-is |
-| **Active recording** | `memory_daily` | Agent calls `save_memory` | Curated facts & insights |
-| **Active recording** | `memory_long_term` | Agent calls `update_long_term_memory` | Consolidated persistent profile |
-
-Auto-ingest captures everything without blocking the response (fire-and-forget). Active recording captures what the agent judges important.
-
-### Hybrid Retrieval
-
-Every incoming user message triggers a **semantic search** (cosine similarity on pgvector embeddings) across all three tables simultaneously. Results are ranked by relevance and injected into the system prompt. The agent can also call `read_memory` for explicit keyword/date-based lookup.
-
-Embeddings are generated **asynchronously** — a pgmq background worker polls the `memory_embedding` queue and writes vectors back to each row. This means writes are never blocked by embedding API latency.
-
-### Backend Options
-
-| | File backend | Postgres backend |
-|---|---|---|
-| Daily & long-term memory | Markdown files | PostgreSQL tables |
-| Conversation auto-ingest | — | pgvector + pgmq |
-| Semantic search | — | pgvector cosine similarity |
-| Setup | Zero-config | `docker/pg.Dockerfile` |
-
 ## Quick Start
 
 ```bash
 # Clone
-git clone https://github.com/clawplay/clawbot.git
-cd clawbot
+git clone https://github.com/clawplay/baibo.git
+cd baibo
 
 # Install
 uv sync
 
 # Configure
-uv run nanobot onboard
+uv run baibo onboard
 
 # Start gateway
-uv run nanobot gateway
+uv run baibo gateway
 ```
 
-## Supported Channels
+## Documentation
 
-| Channel | Protocol | Config key |
-|---|---|---|
-| Telegram | Bot API (polling) | `channels.telegram` |
-| WhatsApp | WebSocket bridge | `channels.whatsapp` |
-| Slack | Socket Mode | `channels.slack` |
-| Discord | Gateway WebSocket | `channels.discord` |
-| Feishu / Lark | WebSocket | `channels.feishu` |
-| DingTalk | Stream Mode | `channels.dingtalk` |
-| Email | IMAP + SMTP | `channels.email` |
-| QQ | botpy SDK | `channels.qq` |
-| Mochat | Socket.IO | `channels.mochat` |
-| OpenAI-compatible HTTP | REST API | `channels.openapi` |
+- **[Memory System](docs/memory_system.md)** - Hybrid memory architecture and storage strategies
+- **[Deployment Guide](docs/deploy.md)** - Deployment options and configuration
 
 ## License
 
-Based on [Nanobot](https://github.com/HKUDS/nanobot) — see LICENSE for details.
+Based on [baibo](https://github.com/HKUDS/baibo) — see LICENSE for details.
